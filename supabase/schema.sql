@@ -141,6 +141,11 @@ begin
     raise exception 'Informe um telefone válido.';
   end if;
 
+  -- Serializa reservas do mesmo dia, inclusive quando os horários se sobrepõem.
+  perform pg_advisory_xact_lock(hashtext('allan-barber-' || (
+    select slot_date::text from public.availability_slots where id = p_slot_id
+  )));
+
   select * into v_slot
   from public.availability_slots
   where id = p_slot_id and active = true
@@ -198,3 +203,41 @@ grant all on public.admin_users to authenticated;
 -- Depois de criar o usuário do Allan em Authentication > Users,
 -- execute a linha abaixo substituindo pelo UUID real:
 -- insert into public.admin_users (user_id) values ('UUID-DO-USUARIO-ALLAN');
+
+
+-- Retorna apenas horários ativos sem conflito com reservas existentes.
+create or replace function public.get_available_slots(
+  p_from date,
+  p_to date
+)
+returns table (
+  id uuid,
+  slot_date date,
+  start_time time
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select s.id, s.slot_date, s.start_time
+  from public.availability_slots s
+  where s.active = true
+    and s.slot_date between p_from and p_to
+    and s.slot_date >= current_date
+    and not exists (
+      select 1
+      from public.bookings b
+      join public.availability_slots booked_slot on booked_slot.id = b.slot_id
+      where b.status <> 'Cancelado'
+        and booked_slot.slot_date = s.slot_date
+        and (booked_slot.slot_date + booked_slot.start_time)
+            < (s.slot_date + s.start_time + interval '1 minute')
+        and (booked_slot.slot_date + booked_slot.start_time
+             + make_interval(mins => b.duration_minutes))
+            > (s.slot_date + s.start_time)
+    )
+  order by s.slot_date, s.start_time;
+$$;
+
+grant execute on function public.get_available_slots(date, date) to anon, authenticated;
